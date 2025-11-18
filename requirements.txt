@@ -1,8 +1,7 @@
 streamlit
-pandas
-PyPDF2
-tabula-py
-jpype1
-requests
-pillow
+pdfplumber
 pdf2image
+pytesseract
+pillow
+groq
+pandas
