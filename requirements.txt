@@ -1,0 +1,6 @@
+streamlit
+pandas
+PyPDF2
+tabula-py
+jpype1
+requests
