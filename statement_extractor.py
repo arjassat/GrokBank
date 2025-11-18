@@ -12,7 +12,8 @@ import os
 
 st.title("Bank Statement Extractor")
 st.markdown("""
-This app extracts transactions from bank statement PDFs (text or scanned) using free AI.
+This app extracts transactions from bank statement PDFs (text or scanned) from various South African banks (e.g., Capitec, FNB, Standard Bank, Nedbank, HBZ) using free AI.
+It handles different formats automatically.
 It outputs a CSV with columns: date, description, amount.
 Powered by pytesseract for OCR and Groq's free Llama model for extraction.
 """)
@@ -66,17 +67,33 @@ if uploaded_files and st.button("Extract and Download CSV"):
 
         for chunk_idx, chunk in enumerate(chunks):
             prompt = f"""
-Extract all transactions from this bank statement text chunk. Each transaction should have date, description, amount (positive for credit, negative for debit if applicable).
-Ignore non-transaction text like headers or footers.
+You are an expert at extracting transactions from South African bank statements in various formats (e.g., Capitec, FNB, Standard Bank, Nedbank, HBZ, etc.). 
+The text may come from scanned or text PDFs and could be messy due to OCR errors. Ignore that and focus on identifying transaction data.
+
+Key rules:
+- Extract ALL transactions, including debits, credits, fees, interest, etc.
+- Date: Standardize to YYYY-MM-DD. Infer year from context if missing (e.g., use statement date or current year). Handle formats like DD/MM/YY, DD MMM YYYY, etc.
+- Description: Clean and concise text, combining reference/description fields if needed. Remove unnecessary details like card numbers or auth codes unless relevant.
+- Amount: Numeric value. Use positive for credits/deposits, negative for debits/withdrawals/fees. Parse currencies (assume ZAR if not specified). Fix OCR errors (e.g., '1,000.00' or '1000,00').
+- Ignore non-transaction text: headers, footers, summaries, balances, account details, charts, VAT totals, etc.
+- Handle multi-page or tabular formats: Look for columns like Post Date, Trans Date, Description, Reference, Fees, Amount, Balance.
+- If duplicate transactions across chunks, include only once (but since chunks are sequential, process as is).
+- For banks like Capitec: Columns often Post Date, Trans Date, Description, Reference, Fees, Amount, Balance.
+- For FNB: Date, Description, Amount, Balance, Accrued Charges.
+- For Standard Bank: Details, Service Fee, Debits, Credits, Date, Balance.
+- For Nedbank: Tran list no, Date, Description, Fees, Debits, Credits, Balance.
+- For HBZ: Date, Particulars, Debit, Credit.
+- Adapt to variations; the AI should generalize.
+
 Output ONLY a JSON list of objects like: [{{"date": "YYYY-MM-DD", "description": "text", "amount": "number"}}]
-If no transactions, output empty list [].
+Sort by date ascending. If no transactions, output empty list [].
 
 Text: {chunk}
 """
 
             try:
                 completion = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",  # Updated model (replacement for deprecated llama3-70b-8192)
+                    model="llama-3.3-70b-versatile",  # Updated model
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0,
                     max_tokens=4096,
@@ -90,10 +107,18 @@ Text: {chunk}
                 st.error(f"AI extraction failed for {file.name} chunk {chunk_idx+1}: {e}")
                 continue
 
+        # Deduplicate and sort transactions across chunks/files if needed
+        unique_transactions = {f"{t['date']}_{t['description']}_{t['amount']}": t for t in file_transactions}.values()
+        file_transactions = sorted(unique_transactions, key=lambda x: x['date'])
+
         all_transactions.extend(file_transactions)
         progress_bar.progress((idx + 1) / total_files)
 
     if all_transactions:
+        # Global dedup and sort
+        unique_all = {f"{t['date']}_{t['description']}_{t['amount']}": t for t in all_transactions}.values()
+        all_transactions = sorted(unique_all, key=lambda x: x['date'])
+
         df = pd.DataFrame(all_transactions)
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
