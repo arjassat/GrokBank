@@ -4,3 +4,5 @@ PyPDF2
 tabula-py
 jpype1
 requests
+pillow
+pdf2image
