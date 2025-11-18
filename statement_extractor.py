@@ -62,6 +62,7 @@ def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
         images = convert_from_bytes(pdf_data, dpi=200) 
         total_pages = len(images)
         
+        # Extract the schema definition for the API call
         schema_definition = SYSTEM_INSTRUCTION_TEXT.split('Strictly adhere to this JSON Schema:')[1].strip()
         response_schema = json.loads(schema_definition)
 
@@ -274,10 +275,16 @@ if uploaded_files:
 st.sidebar.markdown('<p class="balance-check-header">💰 Balance Reconciliation</p>', unsafe_allow_html=True)
 st.sidebar.caption("Manually enter the start/end balances for verification.")
 
-start_balance = st.sidebar.number_input("Enter Statement Starting Balance:", value=0.0, step=0.01)
-end_balance = st.sidebar.number_input("Enter Statement Ending Balance:", value=0.0, step=0.01)
+# We use session state to preserve the balance inputs
+if 'start_balance' not in st.session_state:
+    st.session_state['start_balance'] = 0.0
+if 'end_balance' not in st.session_state:
+    st.session_state['end_balance'] = 0.0
 
-# Perform the Balance Check if data is available
+start_balance = st.sidebar.number_input("Enter Statement Starting Balance:", key='start_balance_input', value=st.session_state['start_balance'], step=0.01)
+end_balance = st.sidebar.number_input("Enter Statement Ending Balance:", key='end_balance_input', value=st.session_state['end_balance'], step=0.01)
+
+# Perform the Balance Check if data is available and balances are provided
 if not final_df.empty and (start_balance != 0.0 or end_balance != 0.0):
     total_change = final_df['Amount'].sum()
     calculated_end_balance = start_balance + total_change
@@ -289,11 +296,12 @@ if not final_df.empty and (start_balance != 0.0 or end_balance != 0.0):
     st.sidebar.metric(label="Total Transaction Change", value=f"R{total_change:,.2f}")
     st.sidebar.metric(label="Calculated Ending Balance", value=f"R{calculated_end_balance:,.2f}")
 
+    # Display result based on difference
     if abs(reconciliation_diff) < 0.01:
         st.sidebar.success("✅ Balances Reconcile Perfectly!")
     else:
         st.sidebar.error(f"❌ Balance Mismatch! Discrepancy: R{reconciliation_diff:,.2f}")
-        st.sidebar.caption("This indicates missing transactions or incorrect amount extraction.")
+        st.sidebar.caption("This indicates missing transactions or incorrect amount extraction. Check the raw extracted data.")
 
 # --- Standard Sidebar ---
 st.sidebar.header("API Key Status")
@@ -305,14 +313,3 @@ st.sidebar.markdown("1. **Aggressive Extraction** (for SA banks).")
 st.sidebar.markdown("2. Tries **Tabular extraction** (fastest for digital PDFs).")
 st.sidebar.markdown("3. If that fails, it uses **Gemini AI OCR** (for scanned images/difficult layouts).")
 st.sidebar.markdown("4. **Date Imputation:** Missing dates are filled using the date of the preceding transaction.")
-```eof
-
-***
-
-### Summary of Fixes:
-
-1.  **Stop Missing Transactions:** The `SYSTEM_INSTRUCTION_TEXT` now includes **CRITICAL INSTRUCTIONS** telling the AI to identify the SA bank format and be **extremely aggressive** in extracting ALL transactions, regardless of how messy the layout appears.
-2.  **South African Bank Recognition:** The instruction now explicitly mentions South African banks (`FNB, Standard Bank, Absa, Nedbank`) to guide the AI's pattern recognition.
-3.  **Balance Validation:** A new section has been added to the Streamlit sidebar allowing you to input the official **Starting Balance** and **Ending Balance** from the statement. After extraction, the script automatically checks if:
-    $$\text{Starting Balance} + \sum (\text{Extracted Amounts}) = \text{Ending Balance}$$
-    If they don't match, it displays the discrepancy, helping you instantly spot missing transactions.
