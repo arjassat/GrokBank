@@ -17,14 +17,17 @@ import time
 API_KEY = os.environ.get("GEMINI_API_KEY") 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
 SYSTEM_INSTRUCTION_TEXT = """
-You are a highly specialized financial transaction extractor. Your task is to process raw bank statement text or images and strictly output a JSON array of transactions.
+You are a highly specialized financial transaction extractor for South African bank statements. Your task is to process raw bank statement text or images and strictly output a JSON array of transactions.
+
+**CRITICAL INSTRUCTION FOR ACCURACY:** 1. **Identify Bank Context:** Analyze the statement layout (e.g., FNB, Standard Bank, Absa, Nedbank) to understand its specific format.
+2. **Aggressive Extraction:** You must be extremely aggressive in extracting ALL lines that look like transactions, including those with messy descriptions or seemingly merged columns, to prevent missing any data. Every financial entry must be captured.
 
 The required fields are:
 1. 'Date': (Format: YYYY-MM-DD or DD/MM/YYYY, ensure consistency)
 2. 'Description': (The full transaction description)
 3. 'Amount': (A floating-point number. Debit/Withdrawals must be negative, Credits/Deposits must be positive.)
 
-**CRITICAL INSTRUCTION FOR DATES:** If a transaction line does not contain an explicit date (e.g., in multi-line transactions), you MUST use the date from the preceding transaction in the output JSON array.
+If a transaction line does not contain an explicit date (e.g., in multi-line transactions), you MUST use the date from the preceding transaction in the output JSON array.
 
 Ignore headers, footers, account summaries, and non-transaction text. If a row is clearly a header or a running balance line, ignore it. Only extract confirmed transactions.
 
@@ -205,7 +208,6 @@ def process_uploaded_files(uploaded_files):
             all_transactions_df['Date'] = pd.to_datetime(all_transactions_df['Date'], errors='coerce')
             
             # --- FIX: Impute missing dates using the last known date (Forward Fill) ---
-            # This is the crucial step to fill in transactions that lost their date during extraction
             all_transactions_df['Date'] = all_transactions_df['Date'].ffill() 
             # -------------------------------------------------------------------------
             
@@ -231,6 +233,7 @@ st.markdown("""
     .subheader {font-size: 1.25em; color: #4b5563; margin-bottom: 1.5em;}
     .stButton>button {background-color: #3b82f6; color: white; font-weight: 600; border-radius: 0.5rem; padding: 0.75rem 1.5rem; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1); transition: background-color 0.3s;}
     .stButton>button:hover {background-color: #2563eb;}
+    .balance-check-header {font-size: 1.1em; font-weight: 600; color: #10b981; margin-top: 10px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -244,6 +247,8 @@ if API_KEY:
 else:
     api_key_status = "⚠️ **Gemini API Key Missing.** Multi-modal OCR extraction (required for scanned files) is disabled."
 
+
+final_df = pd.DataFrame() # Initialize final_df outside the button click to use it later
 
 if uploaded_files:
     if st.button("🚀 Start AI Extraction"):
@@ -265,11 +270,49 @@ if uploaded_files:
         else:
             st.error("No transactions could be extracted. Please ensure your files are clear, text-readable PDFs or high-quality scanned copies, and verify your API Key is valid.")
 
+# --- Reconciliation Check UI ---
+st.sidebar.markdown('<p class="balance-check-header">💰 Balance Reconciliation</p>', unsafe_allow_html=True)
+st.sidebar.caption("Manually enter the start/end balances for verification.")
+
+start_balance = st.sidebar.number_input("Enter Statement Starting Balance:", value=0.0, step=0.01)
+end_balance = st.sidebar.number_input("Enter Statement Ending Balance:", value=0.0, step=0.01)
+
+# Perform the Balance Check if data is available
+if not final_df.empty and (start_balance != 0.0 or end_balance != 0.0):
+    total_change = final_df['Amount'].sum()
+    calculated_end_balance = start_balance + total_change
+    
+    reconciliation_diff = calculated_end_balance - end_balance
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Reconciliation Summary**")
+    st.sidebar.metric(label="Total Transaction Change", value=f"R{total_change:,.2f}")
+    st.sidebar.metric(label="Calculated Ending Balance", value=f"R{calculated_end_balance:,.2f}")
+
+    if abs(reconciliation_diff) < 0.01:
+        st.sidebar.success("✅ Balances Reconcile Perfectly!")
+    else:
+        st.sidebar.error(f"❌ Balance Mismatch! Discrepancy: R{reconciliation_diff:,.2f}")
+        st.sidebar.caption("This indicates missing transactions or incorrect amount extraction.")
+
+# --- Standard Sidebar ---
 st.sidebar.header("API Key Status")
 st.sidebar.markdown(api_key_status)
 if not API_KEY:
     st.sidebar.caption("Please add your key to Streamlit secrets as `GEMINI_API_KEY`.")
 st.sidebar.header("Extraction Logic")
-st.sidebar.markdown("1. Tries **Tabular extraction** (fastest for digital PDFs).")
-st.sidebar.markdown("2. If that fails, it uses **Gemini AI OCR** (for scanned images/difficult layouts).")
-st.sidebar.markdown("3. **Date Imputation (New):** Missing dates are automatically filled using the date of the preceding transaction.")
+st.sidebar.markdown("1. **Aggressive Extraction** (for SA banks).")
+st.sidebar.markdown("2. Tries **Tabular extraction** (fastest for digital PDFs).")
+st.sidebar.markdown("3. If that fails, it uses **Gemini AI OCR** (for scanned images/difficult layouts).")
+st.sidebar.markdown("4. **Date Imputation:** Missing dates are filled using the date of the preceding transaction.")
+```eof
+
+***
+
+### Summary of Fixes:
+
+1.  **Stop Missing Transactions:** The `SYSTEM_INSTRUCTION_TEXT` now includes **CRITICAL INSTRUCTIONS** telling the AI to identify the SA bank format and be **extremely aggressive** in extracting ALL transactions, regardless of how messy the layout appears.
+2.  **South African Bank Recognition:** The instruction now explicitly mentions South African banks (`FNB, Standard Bank, Absa, Nedbank`) to guide the AI's pattern recognition.
+3.  **Balance Validation:** A new section has been added to the Streamlit sidebar allowing you to input the official **Starting Balance** and **Ending Balance** from the statement. After extraction, the script automatically checks if:
+    $$\text{Starting Balance} + \sum (\text{Extracted Amounts}) = \text{Ending Balance}$$
+    If they don't match, it displays the discrepancy, helping you instantly spot missing transactions.
