@@ -11,6 +11,7 @@ import base64
 from pdf2image import convert_from_bytes
 from PyPDF2 import PdfReader 
 import time
+import random # Imported for jitter
 
 # --- API Configuration ---
 # NOTE: This relies on a Streamlit Secret named 'GEMINI_API_KEY'
@@ -49,7 +50,7 @@ Strictly adhere to this JSON Schema:
 def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
     """
     Converts each PDF page to an image and sends it to the Gemini API 
-    for OCR and structured extraction with robust error handling.
+    for OCR and structured extraction with robust error handling and improved backoff.
     """
     if not API_KEY:
         st.error("Gemini API Key is missing. Cannot perform image-based OCR extraction.")
@@ -93,8 +94,8 @@ def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
                 }
             }
             
-            # --- Make the API Call with Exponential Backoff and Error Handling ---
-            max_retries = 3
+            # --- Make the API Call with Exponential Backoff and Jitter ---
+            max_retries = 5 # Increased retries
             full_api_url = f"{API_URL}?key={API_KEY}" 
             
             for attempt in range(max_retries):
@@ -107,7 +108,12 @@ def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
                     
                     if 'error' in result:
                         st.error(f"API Error (Page {page_num + 1}, Attempt {attempt + 1}): {result['error']['message']}")
-                        time.sleep(2 ** attempt) 
+                        
+                        # Apply backoff and jitter for the next attempt
+                        if attempt < max_retries - 1:
+                            wait_time = (2 ** attempt) + random.uniform(0, 1.5) # Jitter: 0 to 1.5 seconds added
+                            st.info(f"Retrying page {page_num + 1} in {wait_time:.2f} seconds...")
+                            time.sleep(wait_time)
                         continue 
 
                     if 'candidates' not in result or not result.get('candidates'):
@@ -119,12 +125,16 @@ def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
                     
                     page_transactions = json.loads(json_string)
                     all_extracted_transactions.extend(page_transactions)
-                    break 
+                    break # Success
 
                 except requests.exceptions.RequestException as e:
+                    # Catch 503 (Server Error) and 429 (Too Many Requests)
                     st.error(f"API Request Error on page {page_num + 1} (Attempt {attempt + 1}): Network or HTTP failure: {e}")
                     if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
+                        # Longer jitter for critical errors 503/429
+                        wait_time = (2 ** attempt) + random.uniform(1.0, 3.0) 
+                        st.info(f"Retrying page {page_num + 1} in {wait_time:.2f} seconds...")
+                        time.sleep(wait_time)
                         continue
                     else:
                         break 
