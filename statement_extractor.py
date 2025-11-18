@@ -15,7 +15,7 @@ import time
 # --- API Configuration ---
 # NOTE: This relies on a Streamlit Secret named 'GEMINI_API_KEY'
 API_KEY = os.environ.get("GEMINI_API_KEY") 
-API_URL = "[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent)"
+API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
 SYSTEM_INSTRUCTION_TEXT = """
 You are a highly specialized financial transaction extractor. Your task is to process raw bank statement text or images and strictly output a JSON array of transactions.
 
@@ -89,10 +89,14 @@ def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
             
             # --- Make the API Call with Exponential Backoff and Error Handling ---
             max_retries = 3
+            # Ensure the full URL is properly constructed
+            full_api_url = f"{API_URL}?key={API_KEY}" 
+            
             for attempt in range(max_retries):
                 try:
                     headers = {'Content-Type': 'application/json'}
-                    response = requests.post(f"{API_URL}?key={API_KEY}", headers=headers, json=payload, timeout=60)
+                    # Using the fully constructed URL
+                    response = requests.post(full_api_url, headers=headers, json=payload, timeout=60)
                     response.raise_for_status() 
 
                     result = response.json()
@@ -114,6 +118,7 @@ def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
                     break 
 
                 except requests.exceptions.RequestException as e:
+                    # This is the section generating the "No connection adapters" error
                     st.error(f"API Request Error on page {page_num + 1} (Attempt {attempt + 1}): Network or HTTP failure: {e}")
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
@@ -227,6 +232,13 @@ st.markdown('<p class="subheader">Upload your PDF or scanned bank statements. Us
 
 uploaded_files = st.file_uploader("Upload Bank Statements (PDF/Scanned Images)", type=["pdf"], accept_multiple_files=True)
 
+# Add a check for the API key being available in the environment 
+if API_KEY:
+    api_key_status = "✅ **Gemini API Key Found!** Multi-modal OCR extraction is enabled."
+else:
+    api_key_status = "⚠️ **Gemini API Key Missing.** Multi-modal OCR extraction (required for scanned files) is disabled."
+
+
 if uploaded_files:
     if st.button("🚀 Start AI Extraction"):
         with st.spinner("Analyzing files and extracting transactions..."):
@@ -248,10 +260,8 @@ if uploaded_files:
             st.error("No transactions could be extracted. Please ensure your files are clear, text-readable PDFs or high-quality scanned copies, and verify your API Key is valid.")
 
 st.sidebar.header("API Key Status")
-if API_KEY:
-    st.sidebar.success("✅ **Gemini API Key Found!** Multi-modal OCR extraction is enabled.")
-else:
-    st.sidebar.warning("⚠️ **Gemini API Key Missing.** Multi-modal OCR extraction (required for scanned files) is disabled.")
+st.sidebar.markdown(api_key_status)
+if not API_KEY:
     st.sidebar.caption("Please add your key to Streamlit secrets as `GEMINI_API_KEY`.")
 st.sidebar.header("Extraction Logic")
 st.sidebar.markdown("1. Tries **Tabular extraction** (fastest for digital PDFs).")
