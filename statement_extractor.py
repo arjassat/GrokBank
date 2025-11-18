@@ -10,13 +10,6 @@ from groq import Groq
 import json
 import os
 
-# One-time setup for dependencies (runs on app start)
-if not os.path.exists('/usr/bin/tesseract'):
-    st.info("Installing required system dependencies...")
-    os.system('apt-get update')
-    os.system('apt-get install -y tesseract-ocr poppler-utils')
-    st.info("Dependencies installed.")
-
 st.title("Bank Statement Extractor")
 st.markdown("""
 This app extracts transactions from bank statement PDFs (text or scanned) using free AI.
@@ -24,7 +17,7 @@ It outputs a CSV with columns: date, description, amount.
 Powered by pytesseract for OCR and Groq's free Llama model for extraction.
 """)
 
-api_key = st.text_input("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", type="password")
+api_key = st.text_input("Enter your Groq API Key (get free at console.groq.com)", type="password")
 if not api_key:
     st.warning("Please enter your Groq API key to proceed.")
     st.stop()
