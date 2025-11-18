@@ -9,11 +9,13 @@ import requests
 import json
 import base64
 from pdf2image import convert_from_bytes
-from PyPDF2 import PdfReader # Still used for fallback/initial checks
+from PyPDF2 import PdfReader 
+import time
 
 # --- API Configuration ---
+# NOTE: This relies on a Streamlit Secret named 'GEMINI_API_KEY'
 API_KEY = os.environ.get("GEMINI_API_KEY") 
-API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
+API_URL = "[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent)"
 SYSTEM_INSTRUCTION_TEXT = """
 You are a highly specialized financial transaction extractor. Your task is to process raw bank statement text or images and strictly output a JSON array of transactions.
 
@@ -42,7 +44,7 @@ Strictly adhere to this JSON Schema:
 def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
     """
     Converts each PDF page to an image and sends it to the Gemini API 
-    for OCR and structured extraction.
+    for OCR and structured extraction with robust error handling.
     """
     if not API_KEY:
         st.error("Gemini API Key is missing. Cannot perform image-based OCR extraction.")
@@ -55,18 +57,15 @@ def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
         images = convert_from_bytes(pdf_data, dpi=200) 
         total_pages = len(images)
         
-        # Extract the JSON schema definition for the API call
-        schema_json_string = SYSTEM_INSTRUCTION_TEXT.split('Strictly adhere to this JSON Schema:')[1].strip()
-        response_schema = json.loads(schema_json_string)
+        schema_definition = SYSTEM_INSTRUCTION_TEXT.split('Strictly adhere to this JSON Schema:')[1].strip()
+        response_schema = json.loads(schema_definition)
 
         for page_num, image in enumerate(images):
             
-            # Convert PIL Image to Bytes and then Base64
             img_byte_arr = io.BytesIO()
             image.save(img_byte_arr, format='JPEG')
             base64_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
-            # Construct the Multi-modal Payload
             user_query = "Extract all bank transactions from this page image into the required JSON format."
             
             payload = {
@@ -88,30 +87,52 @@ def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
                 }
             }
             
-            # Make the API Call
-            try:
-                headers = {'Content-Type': 'application/json'}
-                response = requests.post(f"{API_URL}?key={API_KEY}", headers=headers, json=payload)
-                response.raise_for_status() 
+            # --- Make the API Call with Exponential Backoff and Error Handling ---
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    headers = {'Content-Type': 'application/json'}
+                    response = requests.post(f"{API_URL}?key={API_KEY}", headers=headers, json=payload, timeout=60)
+                    response.raise_for_status() 
 
-                result = response.json()
-                json_string = result.candidates[0].content.parts[0].text
-                
-                page_transactions = json.loads(json_string)
-                all_extracted_transactions.extend(page_transactions)
-                
-            except requests.exceptions.RequestException as e:
-                st.error(f"API Request Error on page {page_num + 1}. Status: {response.status_code if 'response' in locals() else 'N/A'}. Skipping page.")
-            except Exception as e:
-                st.error(f"Failed to parse LLM response on page {page_num + 1}: {e}. Skipping page.")
+                    result = response.json()
+                    
+                    if 'error' in result:
+                        st.error(f"API Error (Page {page_num + 1}, Attempt {attempt + 1}): {result['error']['message']}")
+                        time.sleep(2 ** attempt) 
+                        continue 
+
+                    if 'candidates' not in result or not result.get('candidates'):
+                        block_reason = result.get('promptFeedback', {}).get('blockReason', 'Content Blocked (Unknown Reason)')
+                        st.warning(f"Content Blocked (Page {page_num + 1}): {block_reason}. Skipping page.")
+                        break 
+
+                    json_string = result['candidates'][0]['content']['parts'][0]['text']
+                    
+                    page_transactions = json.loads(json_string)
+                    all_extracted_transactions.extend(page_transactions)
+                    break 
+
+                except requests.exceptions.RequestException as e:
+                    st.error(f"API Request Error on page {page_num + 1} (Attempt {attempt + 1}): Network or HTTP failure: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    else:
+                        break 
+                except json.JSONDecodeError:
+                    st.warning(f"Failed to decode JSON response on page {page_num + 1}. The model did not return valid JSON. Skipping page.")
+                    break 
+                except Exception as e:
+                    st.error(f"Unexpected error processing page {page_num + 1}: {e}. Skipping page.")
+                    break 
             
             st.progress((page_num + 1) / total_pages, text=f"Processing page {page_num + 1} of {total_pages}...")
 
         return pd.DataFrame(all_extracted_transactions)
 
     except Exception as e:
-        # Note: If this fails on Streamlit Cloud, it usually means 'poppler-utils' is missing.
-        st.error(f"Error during Multi-modal/OCR extraction on '{filename}'. This could be due to a missing system dependency (like Poppler). Please ensure 'packages.txt' is configured: {e}")
+        st.error(f"Critical error during PDF-to-Image conversion: {e}. Check if 'packages.txt' is correctly installed with 'poppler-utils'.")
         return pd.DataFrame()
 
 
@@ -136,21 +157,21 @@ def process_uploaded_files(uploaded_files):
             tabula_dfs = read_pdf(temp_file_path, pages='all', multiple_tables=True, stream=True, guess=True, silent=True)
             combined_tabula_df = pd.concat(tabula_dfs)
             
-            date_cols = [col for col in combined_tabula_df.columns if re.search(r'date|dat|txn|tranaction', col, re.IGNORECASE)]
-            desc_cols = [col for col in combined_tabula_df.columns if re.search(r'description|narrative|details', col, re.IGNORECASE)]
-            amt_cols = [col for col in combined_tabula_df.columns if re.search(r'amount|debit|credit|dr|cr', col, re.IGNORECASE)]
+            date_cols = [col for col in combined_tabula_df.columns if col and re.search(r'date|dat|txn|tranaction', col, re.IGNORECASE)]
+            desc_cols = [col for col in combined_tabula_df.columns if col and re.search(r'description|narrative|details|particulars', col, re.IGNORECASE)]
+            amt_cols = [col for col in combined_tabula_df.columns if col and re.search(r'amount|debit|credit|dr|cr|value', col, re.IGNORECASE)]
 
             if date_cols and desc_cols and amt_cols:
                 st.success(f"Successfully extracted tabular data from '{file_name}'.")
                 
                 df = combined_tabula_df.copy()
-                if len(amt_cols) >= 2: # Combine Debit/Credit
-                    debit_col = amt_cols[0]
-                    credit_col = amt_cols[1]
-                    df[debit_col] = pd.to_numeric(df[debit_col].astype(str).str.replace(r'[^\d\.]', '', regex=True), errors='coerce').fillna(0)
-                    df[credit_col] = pd.to_numeric(df[credit_col].astype(str).str.replace(r'[^\d\.]', '', regex=True), errors='coerce').fillna(0)
-                    df['Amount'] = df[credit_col] - df[debit_col] 
-                elif 'Amount' in df.columns or len(amt_cols) == 1: # Single Amount Column
+                
+                if len(amt_cols) >= 2: 
+                    col1, col2 = amt_cols[0], amt_cols[1] 
+                    df[col1] = pd.to_numeric(df[col1].astype(str).str.replace(r'[^\d\.]', '', regex=True), errors='coerce').fillna(0)
+                    df[col2] = pd.to_numeric(df[col2].astype(str).str.replace(r'[^\d\.]', '', regex=True), errors='coerce').fillna(0)
+                    df['Amount'] = df[col2] - df[col1] 
+                elif 'Amount' in df.columns or len(amt_cols) == 1: 
                     col = 'Amount' if 'Amount' in df.columns else amt_cols[0]
                     df['Amount'] = pd.to_numeric(df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True), errors='coerce')
                 
@@ -158,11 +179,11 @@ def process_uploaded_files(uploaded_files):
                 df = df[df['Amount'].abs() > 0]
                 all_transactions_df = pd.concat([all_transactions_df, df], ignore_index=True)
             else:
-                raise ValueError("Column matching failed, falling back to AI OCR extraction.")
+                raise ValueError("Inconsistent column structure found, falling back to AI OCR extraction.")
                 
-        except Exception:
+        except Exception as e:
             # 2. Fallback to Multi-modal AI OCR Extraction
-            st.info(f"Tabular extraction failed for '{file_name}'. Initiating AI OCR extraction (page-by-page).")
+            st.info(f"Tabular extraction failed for '{file_name}'. Initiating **AI OCR extraction** (page-by-page).")
             df_llm = extract_data_from_pdf_image_with_llm_logic(file_bytes, file_name)
             all_transactions_df = pd.concat([all_transactions_df, df_llm], ignore_index=True)
         finally:
@@ -180,7 +201,7 @@ def process_uploaded_files(uploaded_files):
             all_transactions_df = all_transactions_df.sort_values(by='Date').reset_index(drop=True)
             all_transactions_df['Date'] = all_transactions_df['Date'].dt.strftime('%Y-%m-%d')
         except:
-            st.warning("Could not reliably convert 'Date' column to a standard format for sorting. Dates are raw.")
+            st.warning("Could not reliably convert 'Date' column to a standard format for sorting. Dates are raw text.")
 
         st.balloons()
         st.success("✅ **Extraction Complete!** Download your CSV below.")
@@ -224,12 +245,14 @@ if uploaded_files:
                 key='download-csv-1'
             )
         else:
-            st.error("No transactions could be extracted. Please ensure your files are clear, text-readable PDFs or high-quality scanned copies.")
+            st.error("No transactions could be extracted. Please ensure your files are clear, text-readable PDFs or high-quality scanned copies, and verify your API Key is valid.")
 
 st.sidebar.header("API Key Status")
 if API_KEY:
     st.sidebar.success("✅ **Gemini API Key Found!** Multi-modal OCR extraction is enabled.")
 else:
     st.sidebar.warning("⚠️ **Gemini API Key Missing.** Multi-modal OCR extraction (required for scanned files) is disabled.")
+    st.sidebar.caption("Please add your key to Streamlit secrets as `GEMINI_API_KEY`.")
 st.sidebar.header("Extraction Logic")
-st.sidebar.markdown("1. **Tabular** (Fast, for digital PDFs). 2. **Gemini OCR** (For image/scanned PDFs).")
+st.sidebar.markdown("1. Tries **Tabular extraction** (fastest for digital PDFs).")
+st.sidebar.markdown("2. If that fails, it uses **Gemini AI OCR** (for scanned images/difficult layouts).")
