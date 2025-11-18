@@ -76,7 +76,7 @@ Text: {chunk}
 
             try:
                 completion = client.chat.completions.create(
-                    model="llama3-70b-8192",  # Free model on Groq
+                    model="llama-3.3-70b-versatile",  # Updated model (replacement for deprecated llama3-70b-8192)
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0,
                     max_tokens=4096,
