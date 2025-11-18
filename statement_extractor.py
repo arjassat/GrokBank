@@ -24,6 +24,8 @@ The required fields are:
 2. 'Description': (The full transaction description)
 3. 'Amount': (A floating-point number. Debit/Withdrawals must be negative, Credits/Deposits must be positive.)
 
+**CRITICAL INSTRUCTION FOR DATES:** If a transaction line does not contain an explicit date (e.g., in multi-line transactions), you MUST use the date from the preceding transaction in the output JSON array.
+
 Ignore headers, footers, account summaries, and non-transaction text. If a row is clearly a header or a running balance line, ignore it. Only extract confirmed transactions.
 
 Strictly adhere to this JSON Schema:
@@ -89,13 +91,11 @@ def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
             
             # --- Make the API Call with Exponential Backoff and Error Handling ---
             max_retries = 3
-            # Ensure the full URL is properly constructed
             full_api_url = f"{API_URL}?key={API_KEY}" 
             
             for attempt in range(max_retries):
                 try:
                     headers = {'Content-Type': 'application/json'}
-                    # Using the fully constructed URL
                     response = requests.post(full_api_url, headers=headers, json=payload, timeout=60)
                     response.raise_for_status() 
 
@@ -118,7 +118,6 @@ def extract_data_from_pdf_image_with_llm_logic(pdf_data, filename):
                     break 
 
                 except requests.exceptions.RequestException as e:
-                    # This is the section generating the "No connection adapters" error
                     st.error(f"API Request Error on page {page_num + 1} (Attempt {attempt + 1}): Network or HTTP failure: {e}")
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
@@ -202,11 +201,19 @@ def process_uploaded_files(uploaded_files):
         all_transactions_df = all_transactions_df.dropna(subset=['Amount'])
         
         try:
+            # Attempting to normalize dates
             all_transactions_df['Date'] = pd.to_datetime(all_transactions_df['Date'], errors='coerce')
+            
+            # --- FIX: Impute missing dates using the last known date (Forward Fill) ---
+            # This is the crucial step to fill in transactions that lost their date during extraction
+            all_transactions_df['Date'] = all_transactions_df['Date'].ffill() 
+            # -------------------------------------------------------------------------
+            
+            # Re-sorting and final formatting
             all_transactions_df = all_transactions_df.sort_values(by='Date').reset_index(drop=True)
             all_transactions_df['Date'] = all_transactions_df['Date'].dt.strftime('%Y-%m-%d')
-        except:
-            st.warning("Could not reliably convert 'Date' column to a standard format for sorting. Dates are raw text.")
+        except Exception as e:
+            st.warning(f"Could not reliably convert, impute, or format 'Date' column: {e}. Dates may be incomplete or raw text.")
 
         st.balloons()
         st.success("✅ **Extraction Complete!** Download your CSV below.")
@@ -232,7 +239,6 @@ st.markdown('<p class="subheader">Upload your PDF or scanned bank statements. Us
 
 uploaded_files = st.file_uploader("Upload Bank Statements (PDF/Scanned Images)", type=["pdf"], accept_multiple_files=True)
 
-# Add a check for the API key being available in the environment 
 if API_KEY:
     api_key_status = "✅ **Gemini API Key Found!** Multi-modal OCR extraction is enabled."
 else:
@@ -252,7 +258,7 @@ if uploaded_files:
             st.download_button(
                 label="⬇️ Download Transactions as CSV",
                 data=csv_output,
-                file_name="extracted_bank_statements.csv",
+                file_name="extracted_bank_statements_imputed.csv",
                 mime="text/csv",
                 key='download-csv-1'
             )
@@ -266,3 +272,4 @@ if not API_KEY:
 st.sidebar.header("Extraction Logic")
 st.sidebar.markdown("1. Tries **Tabular extraction** (fastest for digital PDFs).")
 st.sidebar.markdown("2. If that fails, it uses **Gemini AI OCR** (for scanned images/difficult layouts).")
+st.sidebar.markdown("3. **Date Imputation (New):** Missing dates are automatically filled using the date of the preceding transaction.")
