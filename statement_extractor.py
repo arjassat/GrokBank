@@ -85,7 +85,8 @@ Key rules:
 - For HBZ: Date, Particulars, Debit, Credit.
 - Adapt to variations; the AI should generalize.
 
-Output ONLY a JSON list of objects like: [{{"date": "YYYY-MM-DD", "description": "text", "amount": "number"}}]
+Always output valid JSON, even if empty []. Do not wrap in markdown or add any other text. Start directly with [ and end with ].
+Output ONLY a JSON list of objects like: [{"date": "YYYY-MM-DD", "description": "text", "amount": "number"}]
 Sort by date ascending. If no transactions, output empty list [].
 
 Text: {chunk}
@@ -101,23 +102,29 @@ Text: {chunk}
                 json_str = completion.choices[0].message.content.strip()
                 if json_str.startswith('```json'):
                     json_str = json_str.split('```json')[1].split('```')[0].strip()
-                transactions = json.loads(json_str)
+                if not json_str:
+                    transactions = []
+                else:
+                    transactions = json.loads(json_str)
                 file_transactions.extend(transactions)
+            except json.JSONDecodeError as je:
+                st.error(f"Invalid JSON response for {file.name} chunk {chunk_idx+1}: {json_str}")
+                continue
             except Exception as e:
                 st.error(f"AI extraction failed for {file.name} chunk {chunk_idx+1}: {e}")
                 continue
 
         # Deduplicate and sort transactions across chunks/files if needed
-        unique_transactions = {f"{t['date']}_{t['description']}_{t['amount']}": t for t in file_transactions}.values()
-        file_transactions = sorted(unique_transactions, key=lambda x: x['date'])
+        unique_transactions = {f"{t['date']}_{t['description']}_{t['amount']}": t for t in file_transactions if 'date' in t and 'description' in t and 'amount' in t}.values()
+        file_transactions = sorted(list(unique_transactions), key=lambda x: x['date'])
 
         all_transactions.extend(file_transactions)
         progress_bar.progress((idx + 1) / total_files)
 
     if all_transactions:
         # Global dedup and sort
-        unique_all = {f"{t['date']}_{t['description']}_{t['amount']}": t for t in all_transactions}.values()
-        all_transactions = sorted(unique_all, key=lambda x: x['date'])
+        unique_all = {f"{t['date']}_{t['description']}_{t['amount']}": t for t in all_transactions if 'date' in t and 'description' in t and 'amount' in t}.values()
+        all_transactions = sorted(list(unique_all), key=lambda x: x['date'])
 
         df = pd.DataFrame(all_transactions)
         csv = df.to_csv(index=False).encode('utf-8')
