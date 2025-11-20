@@ -1,7 +1,8 @@
 streamlit
-pdfplumber
 pdf2image
-pytesseract
-pillow
+pypdfium2
 groq
+pytesseract
+pdfplumber
+pillow
 pandas
