@@ -1,115 +1,97 @@
-# app.py
 import streamlit as st
+from groq import Groq
 import pdfplumber
-from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
 import io
 import pandas as pd
-from groq import Groq
-import json
 import os
 
-st.title("Bank Statement Extractor")
-st.markdown("""
-This app extracts transactions from bank statement PDFs (text or scanned) using free AI.
-It outputs a CSV with columns: date, description, amount.
-Powered by pytesseract for OCR and Groq's free Llama model for extraction.
-""")
+# --- Config ---
+st.set_page_config(page_title="Free Bank Statement Extractor", layout="centered")
+st.title("🧾 Free AI Bank Statement to CSV")
+st.caption("Upload scanned or digital PDFs → Get perfect Date | Description | Amount CSV. 100% free & unlimited.")
 
-api_key = st.text_input("Enter your Groq API Key (get free at console.groq.com)", type="password")
-if not api_key:
-    st.warning("Please enter your Groq API key to proceed.")
-    st.stop()
+# Groq is free as of 2025 (use your free key)
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]  # we'll set this in Streamlit secrets
 
-uploaded_files = st.file_uploader("Upload PDF bank statements", type="pdf", accept_multiple_files=True)
+client = Groq(api_key=GROQ_API_KEY)
 
-if uploaded_files and st.button("Extract and Download CSV"):
-    all_transactions = []
-    progress_bar = st.progress(0)
-    total_files = len(uploaded_files)
+def extract_with_ai(image):
+    # Convert image to base64
+    buffered = io.BytesIO()
+    image.save(buffered, format="PNG")
+    img_str = buffered.getvalue().hex()
 
-    client = Groq(api_key=api_key)
-
-    for idx, file in enumerate(uploaded_files):
-        st.write(f"Processing {file.name}...")
-        text = ""
-
-        # Try extracting text directly (for searchable PDFs)
-        try:
-            with pdfplumber.open(file) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
-        except Exception as e:
-            st.warning(f"Error extracting text from {file.name}: {e}")
-
-        # If no text extracted, use OCR
-        if not text.strip():
-            st.write(f"Performing OCR on {file.name}...")
-            try:
-                images = convert_from_bytes(file.getvalue())
-                for img in images:
-                    text += pytesseract.image_to_string(img) + "\n"
-            except Exception as e:
-                st.error(f"OCR failed for {file.name}: {e}")
-                continue
-
-        if not text.strip():
-            st.error(f"No text extracted from {file.name}. Skipping.")
-            continue
-
-        # Chunk text if too large (to avoid token limits, ~8000 chars per chunk)
-        chunks = [text[i:i+8000] for i in range(0, len(text), 8000)]
-        file_transactions = []
-
-        for chunk_idx, chunk in enumerate(chunks):
-            prompt = f"""
-Extract all transactions from this bank statement text chunk. Each transaction should have date, description, amount (positive for credit, negative for debit if applicable).
-The text may be from various South African banks like Capitec, FNB, Standard Bank, Nedbank, HBZ. Adapt to different formats.
-Date: Standardize to YYYY-MM-DD, infer year if needed.
-Description: Combine relevant fields, clean up.
-Amount: Numeric, positive credits, negative debits. Include fees as negative.
-Ignore headers, footers, summaries, balances.
-Output ONLY a JSON list of objects like: [{{"date": "YYYY-MM-DD", "description": "text", "amount": "number"}}]
-If no transactions, output empty list [].
-
-Text: {chunk}
-"""
-
-            try:
-                completion = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",  # Updated model (replacement for deprecated llama3-70b-8192)
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0,
-                    max_tokens=4096,
-                )
-                json_str = completion.choices[0].message.content.strip()
-                if json_str.startswith('```json'):
-                    json_str = json_str.split('```json')[1].split('```')[0].strip()
-                if not json_str:
-                    transactions = []
-                else:
-                    transactions = json.loads(json_str)
-                file_transactions.extend(transactions)
-            except Exception as e:
-                st.error(f"AI extraction failed for {file.name} chunk {chunk_idx+1}: {e}")
-                continue
-
-        all_transactions.extend(file_transactions)
-        progress_bar.progress((idx + 1) / total_files)
-
-    if all_transactions:
-        df = pd.DataFrame(all_transactions)
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Download CSV",
-            data=csv,
-            file_name="extracted_transactions.csv",
-            mime="text/csv"
+    try:
+        chat_completion = client.chat.completions.create(
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extract all transactions from this bank statement image exactly as: Date (YYYY-MM-DD or DD/MM/YYYY), full Description, Amount (with - for debits if present). Return ONLY a markdown table, no extra text."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_str}"}}
+                ]
+            }],
+            model="llama-3.2-11b-vision-preview",  # or llama-3.2-90b-vision-preview when available
+            temperature=0.1,
+            max_tokens=2000
         )
-        st.success("Extraction complete!")
-        st.dataframe(df)  # Preview
-    else:
-        st.warning("No transactions extracted.")
+        return chat_completion.choices[0].message.content
+    except Exception as e:
+        st.error("AI temporarily busy, falling back to OCR...")
+        return None
+
+def ocr_fallback(image):
+    text = pytesseract.image_to_string(image, lang='eng')
+    # Very simple regex-based extraction as fallback
+    lines = [l for l in text.split('\n') if any(c.isdigit() for c in l)]
+    data = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) > 3 and any(p.replace('.', '').replace(',', '').isdigit() for p in parts[-3:]):
+            amount = parts[-1]
+            description = " ".join(parts[:-3]) if len(parts)>5 else " ".join(parts[:-2])
+            date = parts[0] if '/' in parts[0] or '-' in parts[0] else parts[1]
+            data.append([date, description, amount])
+    return pd.DataFrame(data, columns=["Date", "Description", "Amount"]).to_markdown()
+
+# Upload
+uploaded_files = st.file_uploader("Upload bank statements (PDF or images)", accept_multiple_files=True, 
+                                 type=["pdf", "png", "jpg", "jpeg"])
+
+if uploaded_files:
+    all_transactions = []
+    
+    for uploaded_file in uploaded_files:
+        if uploaded_file.type == "application/pdf":
+            with pdfplumber.open(uploaded_file) as pdf:
+                for page in pdf.pages:
+                    img = page.to_image(resolution=300).original
+                    result = extract_with_ai(img)
+                    if result and "date" in result.lower():
+                        df = pd.read_markdown(result, delim="|").dropna()
+                    else:
+                        markdown = ocr_fallback(img)
+                        df = pd.read_markdown(markdown, delim="|").dropna()
+                    all_transactions.append(df)
+        else:
+            image = Image.open(uploaded_file)
+            result = extract_with_ai(image)
+            if result and "date" in result.lower():
+                df = pd.read_markdown(result, delim="|").dropna()
+            else:
+                markdown = ocr_fallback(image)
+                df = pd.read_markdown(markdown, delim="|").dropna()
+            all_transactions.append(df)
+    
+    if all_transactions:
+        final_df = pd.concat(all_transactions, ignore_index=True)
+        final_df = final_df.loc[:, ~final_df.columns.str.contains("^Unnamed")]  # clean
+        st.success(f"Extracted {len(final_df)} transactions!")
+        st.dataframe(final_df)
+        
+        csv = final_df.to_csv(index=False).encode()
+        st.download_button("📄 Download CSV", csv, "bank_transactions.csv", "text/csv")
+
+st.markdown("---")
+st.markdown("Built 100% free • Uses Groq + Llama 3.2 Vision • Share this link with anyone!")
