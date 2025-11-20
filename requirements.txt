@@ -1,6 +1,8 @@
 streamlit
-pdf2image
-pillow
-requests
-pandas
+pymupdf
 pdfplumber
+easyocr
+pandas
+pillow
+torch
+torchvision
