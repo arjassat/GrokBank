@@ -7,3 +7,5 @@ pillow
 torch
 torchvision
 torchaudio
+opencv-python-headless   # ← THIS FIXES THE ERROR
+numpy
