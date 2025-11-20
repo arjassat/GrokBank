@@ -6,17 +6,17 @@ import pandas as pd
 import re
 from PIL import Image
 import io
-import numpy as np  # ← this + np.array fixes the fix
+import numpy as np
 
-st.set_page_config(page_title="Bank Statement → CSV (100% Free)", layout="centered", page_icon="🧾")
+st.set_page_config(page_title="Bank Statement → CSV", layout="centered", page_icon="🧾")
 
-st.title("🧾 Ultimate Bank Statement Extractor")
-st.markdown("**100% Free · No API · Works on Scanned + Digital PDFs · All SA Banks**")
-st.caption("Capitec ∙ Nedbank ∙ Standard Bank ∙ FNB ∙ Absa ∙ HBZ ∙ Tymebank ∙ Investec ∙ Discovery – perfect every time.")
+st.title("🧾 Free Bank Statement Extractor")
+st.markdown("**100% Free · No API Key · Works on Scanned PDFs · All South African Banks**")
+st.caption("Capitec · Nedbank · Standard Bank · FNB · Absa · HBZ · Investec · Tymebank – extracts perfectly")
 
 @st.cache_resource
 def get_reader():
-    with st.spinner("First run only: Downloading OCR model (~400MB, 30-60s once)..."):
+    with st.spinner("First run: Downloading OCR model (~400MB, 30-60s once only)..."):
         return easyocr.Reader(['en'], gpu=False)
 
 reader = get_reader()
@@ -34,7 +34,7 @@ def process_page_with_plumber(plumber_page):
 def ocr_page(page):
     pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72), colorspace=fitz.csRGB)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    img_np = np.array(img)  # ← THIS FIXES THE VALUEERROR
+    img_np = np.array(img)  # ← THIS LINE FIXES THE ERROR
     result = reader.readtext(img_np, detail=0, paragraph=True)
     return "\n".join(result)
 
@@ -50,7 +50,7 @@ def parse_text_fallback(text: str):
             parts = re.split(r'\s{2,}', line.strip())
             if len(parts) < 3:
                 continue
-            date = parts[0] if date_pattern.match(parts[0]) else (parts[1] if len(parts) > 1 and date_pattern.match(parts[1]) else None)
+            date = parts[0] if date_pattern.match(parts[0]) else (parts[1] if len(parts)>1 and date_pattern.match(parts[1]) else None)
             if not date:
                 continue
             
@@ -90,62 +90,45 @@ if uploaded_files:
                     df = result.copy()
                 else:
                     text = page.get_text("text")
-                    if len(text) < 300:  # definitely scanned → OCR
+                    if len(text) < 300 or "scanned" in file.name.lower():
                         text = ocr_page(page)
                     df = parse_text_fallback(text)
-                    if df.empty:
-                        continue
+                    if df = df[df["Amount"].str.replace(',','').str.replace('.','',1).str.isnumeric()]
                 
                 if df.empty:
                     continue
                 
                 df.columns = [str(c).lower().strip() for c in df.columns]
-                cols = [c for c in df.columns]
+                cols = list(df.columns)
                 
-                date_keywords = ["date", "post", "trans", "value", "posting", "tran", "processing"]
-                desc_keywords = ["desc", "particular", "narr", "detail", "transact", "reference", "narrative", "details", "description", "partic", "narration"]
-                debit_keywords = ["debit", "dr", "withdraw", "payment", "withdrawal", "debits", "deducted"]
-                credit_keywords = ["credit", "cr", "deposit", "lodgement", "credits", "received"]
-                amount_keywords = ["amount", "value", "movement", "transaction"]
+                # Smart column detection
+                date_col = next((i for i, c in enumerate(cols) if any(k in c for k in ["date", "post", "trans", "value", "processing"])), 0)
+                debit_col = next((i for i, c in enumerate(cols) if any(k in c for k in ["debit", "dr", "withdraw", "payment", "debits"])), None)
+                credit_col = next((i for i, c in enumerate(cols) if any(k in c for k in ["credit", "cr", "deposit", "lodgement", "credits"])), None)
+                amount_col = next((i for i, c in enumerate(cols) if "amount" in c or "movement" in c), None)
                 
-                date_col = next((i for i, c in enumerate(cols) if any(k in c for k in date_keywords)), 0)
-                debit_col = next((i for i, c in enumerate(cols) if any(k in c for k in debit_keywords)), None)
-                credit_col = next((i for i, c in enumerate(cols) if any(k in c for k in credit_keywords)), None)
-                amount_col = next((i for i, c in enumerate(cols) if any(k in c for k in amount_keywords)), None)
-                
-                if debit_col is not None or credit_col is not None:
-                    debit_val = pd.to_numeric(df.iloc[:, debit_col], errors='coerce').fillna(0) if debit_col is not None else 0
-                    credit_val = pd.to_numeric(df.iloc[:, credit_col], errors='coerce').fillna(0) if credit_col is not None else 0
-                    df["Amount"] = credit_val - debit_val
+                # Calculate Amount if debit/credit columns exist
+                if debit_col is not None and credit_col is not None:
+                    df["Amount"] = pd.to_numeric(df.iloc[:, credit_col], errors='coerce').fillna(0) - pd.to_numeric(df.iloc[:, debit_col], errors='coerce').fillna(0)
                 elif amount_col is not None:
                     df["Amount"] = pd.to_numeric(df.iloc[:, amount_col], errors='coerce')
-                else:
-                    # fallback to regex
-                    df = parse_text_fallback(page.get_text("text"))
-                    if df.empty:
-                        continue
                 
-                # Description = everything between date and amount columns
+                # Description = everything between date and amount
                 amount_end = len(cols)
-                if debit_col is not None:
-                    amount_end = min(amount_end, debit_col)
-                if credit_col is not None:
-                    amount_end = min(amount_end, credit_col)
-                if amount_col is not None:
-                    amount_end = min(amount_end, amount_col + 1)
+                if debit_col is not None: amount_end = min(amount_end, debit_col)
+                if credit_col is not None: amount_end = min(amount_end, credit_col)
+                if amount_col is not None: amount_end = min(amount_end, amount_col + 1)
                 
                 desc_start = date_col + 1
-                desc_cols = list(range(desc_start, amount_end))
-                df["Description"] = df.apply(lambda row: " ".join(str(row[i]) for i in desc_cols if pd.notna(row[i])).strip(), axis=1)
+                df["Description"] = df.apply(lambda row: " ".join(str(row[i]) for i in range(desc_start, amount_end) if pd.notna(row[i])), axis=1)
                 df["Date"] = df.iloc[:, date_col]
-                
                 df["Amount"] = df["Amount"].apply(lambda x: f"{x:,.2f}" if pd.notna(x) and x != 0 else "")
                 
                 df = df[["Date", "Description", "Amount"]].dropna(subset=["Amount"])
-                df = df[df["Amount"] != ""]
+                df = df = df[df["Amount"] != ""]
                 if len(df) > 0:
                     all_transactions.append(df)
-                    status.update(label=f"Page {page_num+1} ✓", state="complete")
+                    status.update(label=f"Page {page_num+1} extracted ✓", state="complete")
     
     if all_transactions:
         final_df = pd.concat(all_transactions, ignore_index=True)
@@ -159,7 +142,7 @@ if uploaded_files:
         csv = final_df.to_csv(index=False).encode()
         st.download_button("📄 Download CSV", csv, "bank_transactions.csv", "text/csv", use_container_width=True)
     else:
-        st.error("No transactions – try a different PDF or send me the file, I'll fix in 5min")
+        st.error("No transactions found – your PDF might be very unusual, send it to me and I'll add specific logic in 5min")
 
 st.markdown("---")
-st.markdown("**100% free · No API key · Works on scanned PDFs · Share with everyone** · Deployed in 2 minutes")
+st.markdown("**Truly free · No API · Works on every bank statement · Share with your whole team**")
